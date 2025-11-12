@@ -1,1 +1,27 @@
-.idea
+# IDE 配置
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# 二进制文件
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+claam_go_v2
+main
+
+# Go 编译输出
+*.test
+*.out
+*.prof
+
+# 依赖目录（如果使用 vendor）
+vendor/
+
+# 环境变量文件
+.env
+.env.local

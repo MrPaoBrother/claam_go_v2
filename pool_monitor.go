@@ -78,7 +78,8 @@ type poolDetail struct {
 	Protocol string
 }
 
-// PoolMonitor 池子监控器
+// PoolMonitor 池子监控器，负责订阅 BSC 区块并发现新的流动性池子
+// 支持 Uniswap V2 和 V3 协议的池子发现
 type PoolMonitor struct {
 	wsURL      string
 	ethClient  *ethclient.Client
@@ -166,7 +167,10 @@ const uniswapV3ABIJSON = `
 ]
 `
 
-// NewPoolMonitor 创建新的池子监控器
+// NewPoolMonitor 创建新的池子监控器实例
+// 参数 wsURL 是 BSC WebSocket 节点地址
+// 返回 PoolMonitor 实例和错误信息
+// 初始化时会连接以太坊客户端、解析 ABI 并配置支持的协议
 func NewPoolMonitor(wsURL string) (*PoolMonitor, error) {
 	ctx := context.Background()
 
@@ -221,7 +225,9 @@ func NewPoolMonitor(wsURL string) (*PoolMonitor, error) {
 	}, nil
 }
 
-// Close 关闭监控器
+// Close 关闭监控器并释放资源
+// 关闭以太坊客户端连接
+// 返回关闭过程中的错误
 func (pm *PoolMonitor) Close() error {
 	if pm.ethClient != nil {
 		pm.ethClient.Close()
@@ -229,7 +235,11 @@ func (pm *PoolMonitor) Close() error {
 	return nil
 }
 
-// Process 开始处理区块订阅和池子发现
+// Process 开始处理区块订阅和池子发现的主循环
+// 参数 ctx 用于控制协程的生命周期，当 ctx 被取消时，函数会退出
+// 通过 WebSocket 订阅新区块头，当收到新区块时，会分析区块中的交易并发现新的流动性池子
+// 支持自动重连机制，当连接断开时会自动重新连接并重新订阅
+// 返回处理过程中的错误
 func (pm *PoolMonitor) Process(ctx context.Context) error {
 	// 连接 WebSocket
 	c, _, err := websocket.DefaultDialer.Dial(pm.wsURL, nil)
@@ -319,8 +329,8 @@ func (pm *PoolMonitor) Process(ctx context.Context) error {
 		// 处理区块
 		head := params.Result
 		fmt.Printf("\n新区块:\n")
-		blockNumber := hexToUint64(head.Number)
-		blockTimestamp := hexToUint64(head.Timestamp)
+		blockNumber := HexToUint64(head.Number)
+		blockTimestamp := HexToUint64(head.Timestamp)
 		fmt.Printf("高度: %s (十进制: %d)\n", head.Number, blockNumber)
 		fmt.Printf("哈希: %s\n", head.Hash)
 		fmt.Printf("时间戳: %s (UTC: %s)\n", head.Timestamp, time.Unix(int64(blockTimestamp), 0).UTC())
@@ -332,8 +342,14 @@ func (pm *PoolMonitor) Process(ctx context.Context) error {
 	}
 }
 
+// processBlock 处理单个区块，获取区块详情并扫描交易发现新池子
+// 参数 ctx 是上下文，head 是区块头信息
+// 会获取完整区块数据，然后并发扫描所有交易以发现新的流动性池子
+// 返回处理过程中的错误
 func (pm *PoolMonitor) processBlock(ctx context.Context, head BlockHead) error {
-	number, err := hexToBigInt(head.Number)
+	startTime := time.Now()
+
+	number, err := HexToBigInt(head.Number)
 	if err != nil {
 		return fmt.Errorf("解析区块高度失败: %w", err)
 	}
@@ -355,10 +371,18 @@ func (pm *PoolMonitor) processBlock(ctx context.Context, head BlockHead) error {
 			pool.Protocol, pool.Address.Hex(), pool.Token0.Hex(), pool.Token1.Hex(), pool.Fee)
 	}
 
+	// 输出处理耗时
+	elapsed := time.Since(startTime)
+	fmt.Printf("处理耗时: %v\n", elapsed)
+
 	return nil
 }
 
 // discoverPoolsFromTransactions 并发扫描交易，发现所有新池子
+// 参数 ctx 是上下文，txs 是交易列表
+// 使用 goroutine 并发处理每个交易，获取交易回执并分析日志
+// 根据协议配置的 Swap Topic 筛选出相关的池子日志，并调用合约获取池子信息
+// 返回所有新发现的池子信息列表
 func (pm *PoolMonitor) discoverPoolsFromTransactions(ctx context.Context, txs []*types.Transaction) []poolDetail {
 	type poolResult struct {
 		pool poolDetail
@@ -425,6 +449,11 @@ func (pm *PoolMonitor) discoverPoolsFromTransactions(ctx context.Context, txs []
 	return discoveredPools
 }
 
+// inspectPool 检查并解析池子信息
+// 参数 ctx 是上下文，lg 是日志信息，cfg 是协议配置
+// 首先检查池子是否已知，如果已知则返回 false
+// 如果未知，则调用合约获取 token0、token1 和费率信息
+// 返回是否为新池子、池子详情和错误信息
 func (pm *PoolMonitor) inspectPool(ctx context.Context, lg *types.Log, cfg protocolConfig) (bool, poolDetail, error) {
 	poolAddr := lg.Address.Hex()
 
@@ -439,18 +468,18 @@ func (pm *PoolMonitor) inspectPool(ctx context.Context, lg *types.Log, cfg proto
 
 	contract := bind.NewBoundContract(lg.Address, *cfg.ContractABI, pm.ethClient, pm.ethClient, pm.ethClient)
 
-	token0, err := pm.callTokenAddress(ctx, contract, "token0")
+	token0, err := CallTokenAddress(ctx, contract, "token0")
 	if err != nil {
 		return false, poolDetail{}, err
 	}
-	token1, err := pm.callTokenAddress(ctx, contract, "token1")
+	token1, err := CallTokenAddress(ctx, contract, "token1")
 	if err != nil {
 		return false, poolDetail{}, err
 	}
 
 	poolFee := cfg.StaticFee
 	if cfg.FeeFromContract {
-		poolFee, err = pm.callPoolFee(ctx, contract)
+		poolFee, err = CallPoolFee(ctx, contract)
 		if err != nil {
 			return false, poolDetail{}, err
 		}
@@ -466,73 +495,4 @@ func (pm *PoolMonitor) inspectPool(ctx context.Context, lg *types.Log, cfg proto
 		Fee:      poolFee,
 		Protocol: cfg.Name,
 	}, nil
-}
-
-func (pm *PoolMonitor) callTokenAddress(ctx context.Context, contract *bind.BoundContract, method string) (common.Address, error) {
-	var raw []interface{}
-	if err := contract.Call(&bind.CallOpts{Context: ctx}, &raw, method); err != nil {
-		return common.Address{}, err
-	}
-	if len(raw) != 1 {
-		return common.Address{}, fmt.Errorf("unexpected %s return length %d", method, len(raw))
-	}
-
-	switch v := raw[0].(type) {
-	case common.Address:
-		return v, nil
-	case [20]byte:
-		return common.BytesToAddress(v[:]), nil
-	case string:
-		return common.HexToAddress(v), nil
-	default:
-		return common.Address{}, fmt.Errorf("unexpected %s return type %T", method, raw[0])
-	}
-}
-
-func (pm *PoolMonitor) callPoolFee(ctx context.Context, contract *bind.BoundContract) (float64, error) {
-	var raw []interface{}
-	if err := contract.Call(&bind.CallOpts{Context: ctx}, &raw, "fee"); err != nil {
-		return 0, err
-	}
-	if len(raw) != 1 {
-		return 0, fmt.Errorf("unexpected fee return length %d", len(raw))
-	}
-
-	var feeValue uint64
-	switch v := raw[0].(type) {
-	case uint8:
-		feeValue = uint64(v)
-	case uint16:
-		feeValue = uint64(v)
-	case uint32:
-		feeValue = uint64(v)
-	case uint64:
-		feeValue = v
-	case *big.Int:
-		feeValue = v.Uint64()
-	default:
-		return 0, fmt.Errorf("unexpected fee return type %T", raw[0])
-	}
-
-	// Uniswap V3 fee 返回单位为 1e-6，换算为百分比需除以 1e4
-	return float64(feeValue) / 1e4, nil
-}
-
-// 辅助函数：将十六进制字符串转为uint64
-func hexToUint64(hexStr string) uint64 {
-	var n uint64
-	fmt.Sscanf(hexStr, "0x%x", &n)
-	return n
-}
-
-func hexToBigInt(hexStr string) (*big.Int, error) {
-	clean := strings.TrimPrefix(hexStr, "0x")
-	if clean == "" {
-		return big.NewInt(0), nil
-	}
-	number, ok := new(big.Int).SetString(clean, 16)
-	if !ok {
-		return nil, fmt.Errorf("invalid hex: %s", hexStr)
-	}
-	return number, nil
 }
