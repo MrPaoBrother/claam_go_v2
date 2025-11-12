@@ -8,15 +8,12 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// BSC 公共 WebSocket 节点地址（默认值）
-const defaultBSCWssURL = "wss://bsc.drpc.org"
-
 func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	// 获取 WebSocket URL，默认使用 BSC 公共节点
-	wsURL := defaultBSCWssURL
+	wsURL := DefaultBSCWssURL
 
 	// 创建池子监控器
 	monitor, err := NewPoolMonitor(wsURL)

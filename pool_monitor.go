@@ -90,83 +90,6 @@ type PoolMonitor struct {
 	uniV3ABI   *abi.ABI
 }
 
-const pairABIJSON = `
-[
-	{
-		"constant": true,
-		"inputs": [],
-		"name": "token0",
-		"outputs": [
-			{
-				"name": "",
-				"type": "address"
-			}
-		],
-		"payable": false,
-		"stateMutability": "view",
-		"type": "function"
-	},
-	{
-		"constant": true,
-		"inputs": [],
-		"name": "token1",
-		"outputs": [
-			{
-				"name": "",
-				"type": "address"
-			}
-		],
-		"payable": false,
-		"stateMutability": "view",
-		"type": "function"
-	}
-]
-`
-
-const uniswapV3ABIJSON = `
-[
-	{
-		"inputs": [],
-		"name": "token0",
-		"outputs": [
-			{
-				"internalType": "address",
-				"name": "",
-				"type": "address"
-			}
-		],
-		"stateMutability": "view",
-		"type": "function"
-	},
-	{
-		"inputs": [],
-		"name": "token1",
-		"outputs": [
-			{
-				"internalType": "address",
-				"name": "",
-				"type": "address"
-			}
-		],
-		"stateMutability": "view",
-		"type": "function"
-	},
-	{
-		"inputs": [],
-		"name": "fee",
-		"outputs": [
-			{
-				"internalType": "uint24",
-				"name": "",
-				"type": "uint24"
-			}
-		],
-		"stateMutability": "view",
-		"type": "function"
-	}
-]
-`
-
 // NewPoolMonitor 创建新的池子监控器实例
 // 参数 wsURL 是 BSC WebSocket 节点地址
 // 返回 PoolMonitor 实例和错误信息
@@ -185,34 +108,19 @@ func NewPoolMonitor(wsURL string) (*PoolMonitor, error) {
 		return nil, fmt.Errorf("获取链ID失败: %w", err)
 	}
 
-	v2ABI, err := abi.JSON(strings.NewReader(pairABIJSON))
+	v2ABI, err := abi.JSON(strings.NewReader(PairABIJSON))
 	if err != nil {
 		ethCli.Close()
 		return nil, fmt.Errorf("解析 V2 ABI 失败: %w", err)
 	}
 
-	v3ABI, err := abi.JSON(strings.NewReader(uniswapV3ABIJSON))
+	v3ABI, err := abi.JSON(strings.NewReader(UniswapV3ABIJSON))
 	if err != nil {
 		ethCli.Close()
 		return nil, fmt.Errorf("解析 V3 ABI 失败: %w", err)
 	}
 
-	protocols := map[common.Hash]protocolConfig{
-		common.HexToHash("0xd78ad95fa46c994b6551d0da85fc275fe613a1e06de587873393dff2aea0d903"): {
-			Name:            "UniswapV2LikeSwap",
-			SwapTopic:       common.HexToHash("0xd78ad95fa46c994b6551d0da85fc275fe613a1e06de587873393dff2aea0d903"),
-			ContractABI:     &v2ABI,
-			StaticFee:       0.25,
-			FeeFromContract: false,
-		},
-		common.HexToHash("0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67"): {
-			Name:            "UniswapV3Swap",
-			SwapTopic:       common.HexToHash("0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67"),
-			ContractABI:     &v3ABI,
-			StaticFee:       0,
-			FeeFromContract: true,
-		},
-	}
+	protocols := GetProtocolsConfig(&v2ABI, &v3ABI)
 
 	return &PoolMonitor{
 		wsURL:      wsURL,

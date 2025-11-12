@@ -49,7 +49,7 @@ go build -o claam_go_v2 .
 
 ### 方式三：使用自定义 WebSocket 节点
 
-如果需要使用自定义的 BSC WebSocket 节点，可以修改 `main.go` 中的 `defaultBSCWssURL` 常量，或通过环境变量设置（需要修改代码支持）。
+如果需要使用自定义的 BSC WebSocket 节点，可以修改 `const.go` 中的 `DefaultBSCWssURL` 常量，或通过环境变量设置（需要修改代码支持）。
 
 ## 使用说明
 
@@ -61,10 +61,10 @@ go build -o claam_go_v2 .
    - 新区块信息（高度、哈希、时间戳、矿工）
    - 交易总数
    - 发现的新池子信息（协议、地址、token0、token1、费率）
+   - 处理耗时
 
 3. **API 接口**：
    - `GET /ping`：返回 `{"message": "pong"}`
-   - `GET /health`：返回 `{"status": "ok"}`
 
 ## 项目结构
 
@@ -72,6 +72,7 @@ go build -o claam_go_v2 .
 .
 ├── main.go           # 主程序入口，启动 Gin 服务器和监控协程
 ├── pool_monitor.go   # 池子监控器核心逻辑
+├── const.go          # 常量定义（协议配置、ABI、WebSocket URL 等）
 ├── utils.go          # 工具函数（十六进制转换、合约调用等）
 ├── go.mod            # Go 模块依赖
 ├── go.sum            # 依赖校验和
@@ -87,6 +88,15 @@ go build -o claam_go_v2 .
 - **Process**：主处理循环，订阅区块并处理
 - **discoverPoolsFromTransactions**：并发扫描交易发现新池子
 - **inspectPool**：检查并解析池子信息
+
+### 常量定义（const.go）
+
+- **DefaultBSCWssURL**：BSC WebSocket 节点地址
+- **UniswapV2SwapTopic / UniswapV3SwapTopic**：协议 Swap 事件 Topic 哈希
+- **ProtocolUniswapV2Like / ProtocolUniswapV3**：协议名称常量
+- **UniswapV2StaticFee**：Uniswap V2 固定费率
+- **PairABIJSON / UniswapV3ABIJSON**：合约 ABI JSON 字符串
+- **GetProtocolsConfig**：根据 ABI 生成协议配置映射
 
 ### 工具函数（utils.go）
 
@@ -107,6 +117,7 @@ go build -o claam_go_v2 .
 矿工: 0x9f1b7fae54be07f4fee34eb1aacb39a1f7b6fc92
 交易总数: 163
   [新池子] 协议: UniswapV3Swap 地址: 0x47a90A2d92A8367A91EfA1906bFc8c1E05bf10c4 token0: 0x55d398326f99059fF775485246999027B3197955 token1: 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c fee: 0.0100%
+处理耗时: 2.345s
 ```
 
 ## 注意事项
@@ -120,17 +131,27 @@ go build -o claam_go_v2 .
 
 ### 添加新协议支持
 
-在 `pool_monitor.go` 的 `NewPoolMonitor` 函数中，向 `protocols` map 添加新的协议配置：
+1. **在 `const.go` 中添加协议常量**：
+   - 添加 Swap Topic 哈希常量
+   - 添加协议名称常量
+   - 添加协议费率常量（如果适用）
+   - 添加合约 ABI JSON 常量
+
+2. **更新 `GetProtocolsConfig` 函数**：
+   在 `const.go` 的 `GetProtocolsConfig` 函数中添加新协议配置：
 
 ```go
-common.HexToHash("新协议的Swap Topic"): {
-    Name:            "协议名称",
-    SwapTopic:       common.HexToHash("Swap Topic"),
-    ContractABI:     &协议ABI,
-    StaticFee:       固定费率（如果适用）,
+common.HexToHash(新协议SwapTopic): {
+    Name:            新协议名称常量,
+    SwapTopic:       common.HexToHash(新协议SwapTopic),
+    ContractABI:     新协议ABI指针,
+    StaticFee:       固定费率（如果适用，否则为0）,
     FeeFromContract: 是否从合约读取费率,
 },
 ```
+
+3. **在 `NewPoolMonitor` 中解析新协议 ABI**：
+   在 `pool_monitor.go` 的 `NewPoolMonitor` 函数中解析新协议的 ABI，并将 ABI 指针传递给 `GetProtocolsConfig` 函数。
 
 ## 许可证
 
