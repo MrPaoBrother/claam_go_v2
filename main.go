@@ -55,6 +55,9 @@ func main() {
 	}
 	defer store.Close()
 
+	arbQueue := NewArbitrageQueue(cfg.ArbQueueSize)
+
+	// 1. 订阅区块
 	subscriber := NewBlockSubscriber(wsURL, conn, blockQueue)
 	go func() {
 		if err := subscriber.Start(ctx); err != nil {
@@ -62,7 +65,7 @@ func main() {
 		}
 	}()
 
-	// 定时打印队列积压量
+	// // 定时打印队列积压量
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
@@ -76,8 +79,17 @@ func main() {
 		}
 	}()
 
+	// // 2. 发现池子
 	discoverer := NewPoolDiscoverer(blockQueue, conn, store, protocols)
 	go discoverer.Start(ctx)
+
+	// 3. 发现套利机会
+	finder := NewArbitrageFinder(store, arbQueue, cfg)
+	go finder.Start(ctx)
+
+	// 4. 计算套利机会
+	calculator := NewArbitrageCalculator(arbQueue, cfg)
+	go calculator.Start(ctx)
 
 	router := gin.Default()
 	router.GET("/ping", func(c *gin.Context) {

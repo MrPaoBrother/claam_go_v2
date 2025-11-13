@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
 	"sync"
 
+	"github.com/ethereum/go-ethereum/common"
 	_ "modernc.org/sqlite"
 )
 
@@ -77,6 +79,48 @@ ON CONFLICT(id) DO NOTHING;
 
 	_, err := ps.db.Exec(insertStmt, pool.Address.Hex(), pool.Protocol, pool.Token0.Hex(), pool.Token1.Hex(), pool.Fee)
 	return err
+}
+
+// ListPools 返回数据库中所有池子信息
+func (ps *PoolStore) ListPools(ctx context.Context) ([]poolDetail, error) {
+	const selectStmt = `
+SELECT id, protocol, token0, token1, fee
+FROM pools;
+`
+
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+
+	rows, err := ps.db.QueryContext(ctx, selectStmt)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var pools []poolDetail
+	for rows.Next() {
+		var (
+			id       string
+			protocol string
+			token0   string
+			token1   string
+			fee      float64
+		)
+		if err := rows.Scan(&id, &protocol, &token0, &token1, &fee); err != nil {
+			return nil, err
+		}
+		pools = append(pools, poolDetail{
+			Address:  common.HexToAddress(id),
+			Token0:   common.HexToAddress(token0),
+			Token1:   common.HexToAddress(token1),
+			Fee:      fee,
+			Protocol: protocol,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return pools, nil
 }
 
 // Close 关闭数据库
