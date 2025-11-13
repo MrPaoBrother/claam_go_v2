@@ -68,6 +68,10 @@ type protocolConfig struct {
 	ContractABI     *abi.ABI
 	StaticFee       float64
 	FeeFromContract bool
+	Token0Method    string
+	Token1Method    string
+	FixedToken0     *common.Address
+	FixedToken1     *common.Address
 }
 
 type poolDetail struct {
@@ -108,6 +112,12 @@ func NewPoolMonitor(wsURL string) (*PoolMonitor, error) {
 		return nil, fmt.Errorf("获取链ID失败: %w", err)
 	}
 
+	v1ABI, err := abi.JSON(strings.NewReader(UniswapV1ExchangeABIJSON))
+	if err != nil {
+		ethCli.Close()
+		return nil, fmt.Errorf("解析 V1 ABI 失败: %w", err)
+	}
+
 	v2ABI, err := abi.JSON(strings.NewReader(PairABIJSON))
 	if err != nil {
 		ethCli.Close()
@@ -120,7 +130,7 @@ func NewPoolMonitor(wsURL string) (*PoolMonitor, error) {
 		return nil, fmt.Errorf("解析 V3 ABI 失败: %w", err)
 	}
 
-	protocols := GetProtocolsConfig(&v2ABI, &v3ABI)
+	protocols := GetProtocolsConfig(&v1ABI, &v2ABI, &v3ABI)
 
 	return &PoolMonitor{
 		wsURL:      wsURL,
@@ -308,7 +318,7 @@ func (pm *PoolMonitor) discoverPoolsFromTransactions(ctx context.Context, txs []
 		wg.Add(1)
 		go func(tx *types.Transaction) {
 			defer wg.Done()
-
+			// TODO 由于免费节点不提供批量查，暂时先单个操作
 			receipt, err := pm.ethClient.TransactionReceipt(ctx, tx.Hash())
 			if err != nil {
 				// 获取回执失败，不发送结果
@@ -376,13 +386,35 @@ func (pm *PoolMonitor) inspectPool(ctx context.Context, lg *types.Log, cfg proto
 
 	contract := bind.NewBoundContract(lg.Address, *cfg.ContractABI, pm.ethClient, pm.ethClient, pm.ethClient)
 
-	token0, err := CallTokenAddress(ctx, contract, "token0")
-	if err != nil {
-		return false, poolDetail{}, err
+	token0Method := cfg.Token0Method
+	if token0Method == "" {
+		token0Method = "token0"
 	}
-	token1, err := CallTokenAddress(ctx, contract, "token1")
-	if err != nil {
-		return false, poolDetail{}, err
+	token1Method := cfg.Token1Method
+	if token1Method == "" {
+		token1Method = "token1"
+	}
+
+	var token0 common.Address
+	var token1 common.Address
+	var err error
+
+	if cfg.FixedToken0 != nil {
+		token0 = *cfg.FixedToken0
+	} else if token0Method != "" {
+		token0, err = CallTokenAddress(ctx, contract, token0Method)
+		if err != nil {
+			return false, poolDetail{}, err
+		}
+	}
+
+	if cfg.FixedToken1 != nil {
+		token1 = *cfg.FixedToken1
+	} else if token1Method != "" {
+		token1, err = CallTokenAddress(ctx, contract, token1Method)
+		if err != nil {
+			return false, poolDetail{}, err
+		}
 	}
 
 	poolFee := cfg.StaticFee
