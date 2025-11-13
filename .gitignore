@@ -25,3 +25,9 @@ vendor/
 # 环境变量文件
 .env
 .env.local
+
+# SQLite 数据文件
+pools.db
+pools.db-journal
+pools.db-wal
+pools.db-shm

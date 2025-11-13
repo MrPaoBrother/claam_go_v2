@@ -22,7 +22,7 @@ const (
 	UniswapV1EthPurchaseTopic = "0x7f4091b46c33e918a0f3aa42307641d17bb67029427a5369e54b353984238705"
 
 	// UniswapV2SwapTopic Uniswap V2 及类似协议的 Swap 事件 Topic
-	// 对应事件签名: Swap(address sender, uint256 amount0In, uint256 amount1In, uint256 amount0Out, uint256 amount1Out, address to)
+	// 对应事件签名: Swap(address indexed sender, uint256 amount0In, uint256 amount1In, uint256 amount0Out, uint256 amount1Out, address indexed to)
 	UniswapV2SwapTopic = "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822"
 
 	// UniswapV3SwapTopic Uniswap V3 协议的 Swap 事件 Topic
@@ -54,8 +54,8 @@ const (
 	// UniswapV1StaticFee Uniswap V1 及类似协议的费率（默认 0.30%）
 	UniswapV1StaticFee = 0.30
 
-	// UniswapV2StaticFee Uniswap V2 及类似协议的固定费率（0.25%）
-	UniswapV2StaticFee = 0.25
+	// UniswapV2StaticFee Uniswap V2 及类似协议的基准费率（默认 0.30%）
+	UniswapV2StaticFee = 0.30
 )
 
 // 合约 ABI JSON 字符串

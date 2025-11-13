@@ -1,19 +1,22 @@
 # BSC 池子监控器
 
-一个用于监控 BSC（Binance Smart Chain）区块链上 Uniswap V2 和 V3 协议流动性池子发现的工具。
+一个用于监控 BSC（Binance Smart Chain）区块链上 Uniswap V1 ~ V4 协议流动性池子发现的工具。
 
 ## 功能特性
 
-- 🔍 **实时区块订阅**：通过 WebSocket 订阅 BSC 新区块
-- 🏊 **池子发现**：自动发现 Uniswap V2 和 V3 协议的新流动性池子
-- ⚡ **并发处理**：使用 goroutine 并发处理交易，提高处理效率
-- 📊 **池子信息**：获取池子的 token0、token1 和费率信息
-- 🌐 **HTTP API**：提供简单的 HTTP 接口用于健康检查
+- 🔍 **实时区块订阅**：通过 WebSocket 订阅 BSC 新区块并写入内存队列
+- 🏊 **池子发现**：自动发现 Uniswap V1 / V2 / V3 / V4 协议的新流动性池子
+- ⚡ **并发处理**：队列消费 + 每个区块独立协程并发解析交易
+- 📊 **池子信息**：获取池子的 token0、token1、费率等信息并落库
+- 💾 **SQLite 持久化**：将发现的池子写入本地 SQLite 数据库
+- 🌐 **HTTP API**：提供简单的 HTTP 接口用于快速检查
 
 ## 支持的协议
 
+- **Uniswap V1 Like**：监听 TokenPurchase / EthPurchase 事件
 - **Uniswap V2 Like**：支持所有基于 Uniswap V2 的 DEX（如 PancakeSwap）
 - **Uniswap V3**：支持 Uniswap V3 协议
+- **Uniswap V4（实验性）**：复用 V3 ABI，后续可根据正式规范调整
 
 ## 环境要求
 
@@ -47,21 +50,25 @@ go build -o claam_go_v2 .
 ./claam_go_v2
 ```
 
-### 方式三：使用自定义 WebSocket 节点
+### 方式三：使用自定义 WebSocket 节点或队列长度
 
-如果需要使用自定义的 BSC WebSocket 节点，可以修改 `const.go` 中的 `DefaultBSCWssURL` 常量，或通过环境变量设置（需要修改代码支持）。
+如果需要使用自定义的 BSC WebSocket 节点，可修改 `const.go` 中的 `DefaultBSCWssURL` 常量。  
+常用环境变量：
+- `BLOCK_QUEUE_SIZE`：内存队列最大积压区块数（默认 `1000`）
+- `SQLITE_PATH`：池子数据存储路径（默认 `pools.db`）
 
 ## 使用说明
 
-1. **启动服务**：运行程序后，会自动：
-   - 启动 HTTP 服务器（默认端口 8080）
-   - 在后台协程中启动区块监控
+1. **启动服务**：运行程序后会自动拉起以下协程：
+   - `BlockSubscriber`：订阅新区块写入内存队列
+   - `PoolDiscoverer`：消费队列并并发解析每个区块的交易
+   - Gin HTTP 服务（默认端口 `:8080`）
 
-2. **查看输出**：程序会在控制台输出：
-   - 新区块信息（高度、哈希、时间戳、矿工）
-   - 交易总数
-   - 发现的新池子信息（协议、地址、token0、token1、费率）
-   - 处理耗时
+2. **查看输出**：控制台会输出：
+   - 区块高度与哈希
+   - 交易数量
+   - 新池子信息（协议、地址、token0、token1、费率）
+   - 每个区块的处理耗时
 
 3. **API 接口**：
    - `GET /ping`：返回 `{"message": "pong"}`
@@ -70,10 +77,14 @@ go build -o claam_go_v2 .
 
 ```
 .
-├── main.go           # 主程序入口，启动 Gin 服务器和监控协程
-├── pool_monitor.go   # 池子监控器核心逻辑
-├── const.go          # 常量定义（协议配置、ABI、WebSocket URL 等）
-├── utils.go          # 工具函数（十六进制转换、合约调用等）
+├── main.go              # 程序入口，初始化组件并启动协程
+├── block_queue.go       # 区块内存队列
+├── block_subscriber.go  # 区块订阅器
+├── pool_discoverer.go   # 池子发现者
+├── pool_store.go        # SQLite 存储封装
+├── protocol_config.go   # 协议配置结构
+├── const.go             # 常量定义（协议配置、ABI、WebSocket URL 等）
+├── utils.go             # 工具函数（十六进制转换、合约调用等）
 ├── go.mod            # Go 模块依赖
 ├── go.sum            # 依赖校验和
 └── README.md         # 本文件
@@ -83,11 +94,11 @@ go build -o claam_go_v2 .
 
 ### 主要组件
 
-- **PoolMonitor**：池子监控器结构体，负责区块订阅和池子发现
-- **NewPoolMonitor**：创建监控器实例
-- **Process**：主处理循环，订阅区块并处理
-- **discoverPoolsFromTransactions**：并发扫描交易发现新池子
-- **inspectPool**：检查并解析池子信息
+- **BlockSubscriber**：负责订阅新区块并写入内存队列
+- **BlockQueue**：带容量限制的区块缓冲队列
+- **PoolDiscoverer**：消费队列、并发解析交易、发现池子
+- **PoolStore**：管理 SQLite 存储，负责池子去重和持久化
+- **utils**：通用工具函数（十六进制转换、合约调用等）
 
 ### 常量定义（const.go）
 
@@ -150,8 +161,8 @@ common.HexToHash(新协议SwapTopic): {
 },
 ```
 
-3. **在 `NewPoolMonitor` 中解析新协议 ABI**：
-   在 `pool_monitor.go` 的 `NewPoolMonitor` 函数中解析新协议的 ABI，并将 ABI 指针传递给 `GetProtocolsConfig` 函数。
+3. **在启动流程中解析新协议 ABI**：
+   在 `main.go` 中解析新协议的 ABI，并将 ABI 指针传递给 `GetProtocolsConfig`。
 
 ## 许可证
 
