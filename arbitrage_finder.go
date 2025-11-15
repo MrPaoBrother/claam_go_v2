@@ -92,8 +92,11 @@ func (af *ArbitrageFinder) enumerateCycles() {
 	if maxHops < 2 {
 		maxHops = 2
 	}
-	initialAmount := af.cfg.ArbInitialCapital
-	minProfit := af.cfg.ArbMinProfit
+	// 假设买入 1 个 token0（以最小单位计，例如 1.0 表示 1e18 个 token）
+	// 不需要考虑 USD 价格，直接用 token 数量进行比较
+	initialAmount := 1.0
+	// minProfit 也改为以 token 数量计，例如 0.0 表示只要最终数量 > 初始数量就算盈利
+	minProfit := 0.0
 
 	// 收集所有唯一的 token 地址作为起点
 	tokenSet := make(map[common.Address]struct{})
@@ -214,7 +217,7 @@ func (af *ArbitrageFinder) handleCircle(circle arbitrageCircle, initialAmount, m
 		return false
 	}
 
-	// pathDesc := formatPath(path)
+	pathDesc := formatPath(path)
 	// log.Printf("检测到套利环 (跳数 %d): %s", len(path), pathDesc)
 
 	estimated, profitable := af.simulatePath(initialAmount, path, minProfit)
@@ -222,8 +225,9 @@ func (af *ArbitrageFinder) handleCircle(circle arbitrageCircle, initialAmount, m
 		return false
 	}
 
-	// log.Printf("初步可盈利套利 (跳数 %d): 初始 %.6f USDT -> 预计 %.6f USDT, 利润 %.6f, 路径: %s",
-	// 	len(path), initialAmount, estimated, estimated-initialAmount, pathDesc)
+	profit := estimated - initialAmount
+	log.Printf("初步可盈利套利 (跳数 %d): 初始 1 个 token -> 最终 %.6f 个 token, 利润 %.6f 个 token, 路径: %s",
+		len(path), estimated, profit, pathDesc)
 
 	af.markPath(pathKey)
 	startToken := path[0].FromToken
@@ -232,16 +236,18 @@ func (af *ArbitrageFinder) handleCircle(circle arbitrageCircle, initialAmount, m
 }
 
 // simulatePath 模拟套利路径，使用实际的 AMM 公式计算
-// 参数 initial 是初始投入的 token0 数量（假设为 1 USDT 等值）
+// 参数 initial 是初始投入的 token0 数量（以最小单位计，例如 1.0 表示 1e18 个 token）
 // 参数 path 是套利路径，每一步都是一个交易对
-// 参数 minProfit 是最小利润要求
+// 参数 minProfit 是最小利润要求（以 token 数量计）
 // 返回最终得到的 token0 数量和是否盈利
+// 逻辑：假设买入 1 个 token0，通过路径交换后，如果最终得到的 token0 数量 > 1，则认为有盈利
 func (af *ArbitrageFinder) simulatePath(initial float64, path []graphEdge, minProfit float64) (float64, bool) {
 	if len(path) == 0 {
 		return 0, false
 	}
 
-	// 假设初始投入 1 USDT 等值的 token0
+	// 假设初始买入 1 个 token0（以最小单位计，例如 1.0 表示 1e18 个 token）
+	// 不需要考虑 USD 价格，直接用 token 数量进行比较
 	amount := initial
 
 	// 遍历路径中的每一步，使用实际的 AMM 公式计算
@@ -328,7 +334,8 @@ func (af *ArbitrageFinder) simulatePath(initial float64, path []graphEdge, minPr
 		}
 	}
 
-	// 计算利润
+	// 计算利润：最终得到的 token0 数量 - 初始投入的 token0 数量
+	// 如果最终数量 > 初始数量，则认为有盈利
 	profit := amount - initial
 	return amount, profit >= minProfit
 }

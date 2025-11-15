@@ -92,10 +92,10 @@ func main() {
 
 	arbQueue := NewArbitrageQueue(cfg.ArbQueueSize)
 
-	// // 1. 订阅区块
+	// 1. 订阅区块
 	startBlockSubscriber(ctx, wsURL, conn, blockQueue)
 
-	// // 2. 发现池子
+	// 2. 发现池子
 	protocols := GetProtocolsConfig(v1ABI, v2ABI, v3ABI)
 	discoverer := NewPoolDiscoverer(blockQueue, conn, store, protocols)
 	go discoverer.Start(ctx)
