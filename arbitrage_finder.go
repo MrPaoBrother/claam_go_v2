@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"math/big"
 	"sort"
 	"strings"
 	"sync"
@@ -24,26 +25,20 @@ type graphEdge struct {
 
 // ArbitrageFinder 负责发现潜在套利路径
 type ArbitrageFinder struct {
-	store      *PoolStore
-	queue      *ArbitrageQueue
-	cfg        *AppConfig
-	mu         sync.RWMutex
-	tokens     []common.Address
-	tokenIndex map[common.Address]int
-	adjacency  map[int][]graphEdge
-	seenPaths  map[string]struct{}
+	store     *PoolStore
+	queue     *ArbitrageQueue
+	cfg       *AppConfig
+	mu        sync.RWMutex
+	seenPaths map[string]struct{}
 }
 
 // NewArbitrageFinder 创建套利路径发现者
 func NewArbitrageFinder(store *PoolStore, queue *ArbitrageQueue, cfg *AppConfig) *ArbitrageFinder {
 	return &ArbitrageFinder{
-		store:      store,
-		queue:      queue,
-		cfg:        cfg,
-		tokens:     make([]common.Address, 0),
-		tokenIndex: make(map[common.Address]int),
-		adjacency:  make(map[int][]graphEdge),
-		seenPaths:  make(map[string]struct{}),
+		store:     store,
+		queue:     queue,
+		cfg:       cfg,
+		seenPaths: make(map[string]struct{}),
 	}
 }
 
@@ -80,171 +75,260 @@ func (af *ArbitrageFinder) runDiscovery(ctx context.Context) {
 }
 
 func (af *ArbitrageFinder) buildGraph(pools []poolDetail) {
-	tokenIndex := make(map[common.Address]int)
-	tokens := make([]common.Address, 0)
-	adjacency := make(map[int][]graphEdge)
-
-	getIndex := func(addr common.Address) int {
-		if idx, ok := tokenIndex[addr]; ok {
-			return idx
-		}
-		idx := len(tokens)
-		tokenIndex[addr] = idx
-		tokens = append(tokens, addr)
-		return idx
-	}
-
-	for _, p := range pools {
-		idx0 := getIndex(p.Token0)
-		idx1 := getIndex(p.Token1)
-
-		rate := 1 - p.Fee/100.0
-		if rate <= 0 {
-			rate = 1e-6
-		}
-
-		edgeAB := graphEdge{
-			Pool:      p,
-			Protocol:  p.Protocol,
-			Fee:       p.Fee,
-			Rate:      rate,
-			FromToken: p.Token0,
-			ToToken:   p.Token1,
-			FromIndex: idx0,
-			ToIndex:   idx1,
-		}
-		edgeBA := graphEdge{
-			Pool:      p,
-			Protocol:  p.Protocol,
-			Fee:       p.Fee,
-			Rate:      rate,
-			FromToken: p.Token1,
-			ToToken:   p.Token0,
-			FromIndex: idx1,
-			ToIndex:   idx0,
-		}
-		adjacency[idx0] = append(adjacency[idx0], edgeAB)
-		adjacency[idx1] = append(adjacency[idx1], edgeBA)
-	}
-
-	for idx := range tokens {
-		if _, ok := adjacency[idx]; !ok {
-			adjacency[idx] = nil
-		}
-	}
-
 	af.mu.Lock()
 	defer af.mu.Unlock()
-	af.tokens = tokens
-	af.tokenIndex = tokenIndex
-	af.adjacency = adjacency
 	af.seenPaths = make(map[string]struct{})
+	// 新的算法不需要构建索引图，直接使用 pools
 }
 
 func (af *ArbitrageFinder) enumerateCycles() {
-	af.mu.RLock()
-	tokens := append([]common.Address(nil), af.tokens...)
-	adjacency := af.adjacency
-	af.mu.RUnlock()
-
-	n := len(tokens)
-	if n == 0 {
+	pools, err := af.store.ListPools(context.Background())
+	if err != nil {
+		log.Printf("加载池子数据失败: %v", err)
 		return
 	}
 
-	maxDepth := af.cfg.ArbMaxHops
-	if maxDepth < 2 {
-		maxDepth = 2
+	maxHops := af.cfg.ArbMaxHops
+	if maxHops < 2 {
+		maxHops = 2
 	}
 	initialAmount := af.cfg.ArbInitialCapital
 	minProfit := af.cfg.ArbMinProfit
 
-	components := stronglyConnectedComponents(n, adjacency)
-	for _, comp := range components {
-		if len(comp) < 2 {
+	// 收集所有唯一的 token 地址作为起点
+	tokenSet := make(map[common.Address]struct{})
+	for _, p := range pools {
+		tokenSet[p.Token0] = struct{}{}
+		tokenSet[p.Token1] = struct{}{}
+	}
+
+	// 统计信息
+	totalPaths := 0
+	profitablePaths := 0
+
+	// 对每个 token 作为起点，查找套利路径
+	for startToken := range tokenSet {
+		var circles []arbitrageCircle
+		af.findArb(pools, startToken, startToken, maxHops, nil, []common.Address{startToken}, &circles)
+		totalPaths += len(circles)
+		for _, circle := range circles {
+			if af.handleCircle(circle, initialAmount, minProfit) {
+				profitablePaths++
+			}
+		}
+	}
+
+	log.Printf("套利路径统计: 总路径数 %d, 初步盈利路径数 %d", totalPaths, profitablePaths)
+}
+
+// arbitrageCircle 表示一个套利环
+type arbitrageCircle struct {
+	Route []poolDetail     // 路径中的池子列表
+	Path  []common.Address // 路径中的代币列表
+}
+
+// findArb 递归查找套利路径（参考 Python 代码逻辑）
+func (af *ArbitrageFinder) findArb(pairs []poolDetail, tokenIn, tokenOut common.Address, maxHops int,
+	currentPairs []poolDetail, path []common.Address, circles *[]arbitrageCircle) {
+
+	for i := range pairs {
+		pair := pairs[i]
+
+		// 检查 pair 是否包含 tokenIn
+		if pair.Token0 != tokenIn && pair.Token1 != tokenIn {
 			continue
 		}
-		compSet := make(map[int]struct{}, len(comp))
-		for _, idx := range comp {
-			compSet[idx] = struct{}{}
+
+		// 检查储备量是否足够（假设 decimal 为 18，储备量需要 >= 1e18）
+		// 简化处理：直接比较 big.Int，如果储备量太小则跳过
+		minReserve := big.NewInt(1e18) // 1 * 10^18
+		if pair.Reserve0 == nil || pair.Reserve0.Cmp(minReserve) < 0 {
+			continue
+		}
+		if pair.Reserve1 == nil || pair.Reserve1.Cmp(minReserve) < 0 {
+			continue
 		}
 
-		for _, start := range comp {
-			visited := make(map[int]struct{}, len(comp))
-			visited[start] = struct{}{}
-			af.dfsCycles(start, start, compSet, adjacency, visited, nil, maxDepth, initialAmount, minProfit)
+		// 确定输出代币
+		var tempOut common.Address
+		if tokenIn == pair.Token0 {
+			tempOut = pair.Token1
+		} else {
+			tempOut = pair.Token0
+		}
+
+		newPath := make([]common.Address, len(path))
+		copy(newPath, path)
+		newPath = append(newPath, tempOut)
+
+		newPairs := make([]poolDetail, len(currentPairs))
+		copy(newPairs, currentPairs)
+		newPairs = append(newPairs, pair)
+
+		// 如果找到闭环且路径长度 > 2
+		if tempOut == tokenOut && len(path) > 2 {
+			*circles = append(*circles, arbitrageCircle{
+				Route: newPairs,
+				Path:  newPath,
+			})
+		} else if maxHops > 1 && len(pairs) > 1 {
+			// 排除当前 pair，递归查找
+			pairsExcludingThis := make([]poolDetail, 0, len(pairs)-1)
+			pairsExcludingThis = append(pairsExcludingThis, pairs[:i]...)
+			pairsExcludingThis = append(pairsExcludingThis, pairs[i+1:]...)
+			af.findArb(pairsExcludingThis, tempOut, tokenOut, maxHops-1, newPairs, newPath, circles)
 		}
 	}
 }
 
-func (af *ArbitrageFinder) dfsCycles(start, current int, compSet map[int]struct{},
-	adjacency map[int][]graphEdge, visited map[int]struct{},
-	path []graphEdge, maxDepth int, initialAmount, minProfit float64) {
-
-	if len(path) >= maxDepth {
-		return
+// handleCircle 处理一个套利环，返回是否盈利
+func (af *ArbitrageFinder) handleCircle(circle arbitrageCircle, initialAmount, minProfit float64) bool {
+	if len(circle.Route) < 2 {
+		return false
 	}
 
-	for _, edge := range adjacency[current] {
-		if _, ok := compSet[edge.ToIndex]; !ok {
-			continue
+	// 将 circle 转换为 graphEdge 路径
+	path := make([]graphEdge, 0, len(circle.Route))
+	for i := 0; i < len(circle.Path)-1; i++ {
+		pair := circle.Route[i]
+		fromToken := circle.Path[i]
+		toToken := circle.Path[i+1]
+
+		rate := 1 - pair.Fee/100.0
+		if rate <= 0 {
+			rate = 1e-6
 		}
 
-		path = append(path, edge)
-
-		if edge.ToIndex == start && len(path) >= 2 {
-			cycle := append([]graphEdge(nil), path...)
-			af.handleCycle(cycle, initialAmount, minProfit)
-			path = path[:len(path)-1]
-			continue
-		}
-
-		if _, seen := visited[edge.ToIndex]; seen {
-			path = path[:len(path)-1]
-			continue
-		}
-
-		visited[edge.ToIndex] = struct{}{}
-		af.dfsCycles(start, edge.ToIndex, compSet, adjacency, visited, path, maxDepth, initialAmount, minProfit)
-		delete(visited, edge.ToIndex)
-		path = path[:len(path)-1]
-	}
-}
-
-func (af *ArbitrageFinder) handleCycle(cycle []graphEdge, initialAmount, minProfit float64) {
-	if len(cycle) < 2 {
-		return
+		path = append(path, graphEdge{
+			Pool:      pair,
+			Protocol:  pair.Protocol,
+			Fee:       pair.Fee,
+			Rate:      rate,
+			FromToken: fromToken,
+			ToToken:   toToken,
+		})
 	}
 
-	pathKey := hashPath(cycle)
+	pathKey := hashPath(path)
 	if af.isPathSeen(pathKey) {
-		return
+		return false
 	}
 
-	pathDesc := formatPath(cycle)
-	// log.Printf("检测到正循环 (跳数 %d): %s", len(cycle), pathDesc)
+	// pathDesc := formatPath(path)
+	// log.Printf("检测到套利环 (跳数 %d): %s", len(path), pathDesc)
 
-	estimated, profitable := af.simulatePath(initialAmount, cycle, minProfit)
+	estimated, profitable := af.simulatePath(initialAmount, path, minProfit)
 	if !profitable {
-		return
+		return false
 	}
 
-	log.Printf("初步可盈利套利 (跳数 %d): 初始 %.6f USDT -> 预计 %.6f USDT, 利润 %.6f, 路径: %s",
-		len(cycle), initialAmount, estimated, estimated-initialAmount, pathDesc)
+	// log.Printf("初步可盈利套利 (跳数 %d): 初始 %.6f USDT -> 预计 %.6f USDT, 利润 %.6f, 路径: %s",
+	// 	len(path), initialAmount, estimated, estimated-initialAmount, pathDesc)
 
 	af.markPath(pathKey)
-	startToken := cycle[0].FromToken
-	af.queue.Publish(convertToOpportunity(cycle, startToken, initialAmount, estimated))
+	startToken := path[0].FromToken
+	af.queue.Publish(convertToOpportunity(path, startToken, initialAmount, estimated))
+	return true
 }
 
+// simulatePath 模拟套利路径，使用实际的 AMM 公式计算
+// 参数 initial 是初始投入的 token0 数量（假设为 1 USDT 等值）
+// 参数 path 是套利路径，每一步都是一个交易对
+// 参数 minProfit 是最小利润要求
+// 返回最终得到的 token0 数量和是否盈利
 func (af *ArbitrageFinder) simulatePath(initial float64, path []graphEdge, minProfit float64) (float64, bool) {
+	if len(path) == 0 {
+		return 0, false
+	}
+
+	// 假设初始投入 1 USDT 等值的 token0
 	amount := initial
+
+	// 遍历路径中的每一步，使用实际的 AMM 公式计算
 	for _, step := range path {
-		if step.Rate <= 0 {
+		pool := step.Pool
+
+		// 检查储备量是否有效
+		if pool.Reserve0 == nil || pool.Reserve1 == nil {
 			return 0, false
 		}
-		amount *= step.Rate
+
+		reserve0 := new(big.Float).SetInt(pool.Reserve0)
+		reserve1 := new(big.Float).SetInt(pool.Reserve1)
+
+		// 检查储备量是否足够
+		if reserve0.Cmp(big.NewFloat(0)) <= 0 || reserve1.Cmp(big.NewFloat(0)) <= 0 {
+			return 0, false
+		}
+
+		amountFloat := big.NewFloat(amount)
+
+		// 根据协议类型选择不同的计算公式
+		if pool.Protocol == ProtocolUniswapV2Like {
+			// V2 使用恒定乘积公式: x * y = k
+			// Uniswap V2 标准公式: amountOut = (amountIn * reserveOut * 997) / ((reserveIn * 1000) + (amountIn * 997))
+			// 其中 997/1000 表示扣除 0.3% 手续费
+			var reserveIn, reserveOut *big.Float
+			if step.FromToken == pool.Token0 {
+				reserveIn = reserve0
+				reserveOut = reserve1
+			} else {
+				reserveIn = reserve1
+				reserveOut = reserve0
+			}
+
+			// 计算手续费率（例如 0.3% 手续费 = 997/1000）
+			feeRatio := step.Fee / 100.0          // 例如 0.3 表示 0.3%
+			feeMultiplier := 1000.0 - feeRatio*10 // 例如 0.3% = 997
+			amountInWithFee := new(big.Float).Mul(amountFloat, big.NewFloat(feeMultiplier))
+
+			// 计算输出量: amountOut = (amountIn * 997 * reserveOut) / ((reserveIn * 1000) + (amountIn * 997))
+			numerator := new(big.Float).Mul(amountInWithFee, reserveOut)
+			denominatorPart1 := new(big.Float).Mul(reserveIn, big.NewFloat(1000.0))
+			denominator := new(big.Float).Add(denominatorPart1, amountInWithFee)
+			amountOut := new(big.Float).Quo(numerator, denominator)
+
+			amount, _ = amountOut.Float64()
+		} else if pool.Protocol == ProtocolUniswapV3 || pool.Protocol == ProtocolUniswapV4 {
+			// V3/V4 使用集中流动性模型，计算更复杂
+			// 简化处理：使用类似 V2 的公式，但需要考虑价格范围
+			// 这里使用简化的恒定乘积公式作为近似
+			var reserveIn, reserveOut *big.Float
+			if step.FromToken == pool.Token0 {
+				reserveIn = reserve0
+				reserveOut = reserve1
+			} else {
+				reserveIn = reserve1
+				reserveOut = reserve0
+			}
+
+			// V3 手续费通常从合约读取，这里使用配置的费率
+			// V3 手续费单位是 1e-6，例如 3000 表示 0.3%
+			feeRatio := step.Fee / 100.0          // 例如 0.3 表示 0.3%
+			feeMultiplier := 1000.0 - feeRatio*10 // 例如 0.3% = 997
+			amountInWithFee := new(big.Float).Mul(amountFloat, big.NewFloat(feeMultiplier))
+
+			// 简化计算：使用类似 V2 的恒定乘积公式
+			// 注意：V3 的实际计算需要考虑 tick 和流动性分布，这里使用简化公式作为近似
+			numerator := new(big.Float).Mul(amountInWithFee, reserveOut)
+			denominatorPart1 := new(big.Float).Mul(reserveIn, big.NewFloat(1000.0))
+			denominator := new(big.Float).Add(denominatorPart1, amountInWithFee)
+			amountOut := new(big.Float).Quo(numerator, denominator)
+
+			amount, _ = amountOut.Float64()
+		} else {
+			// V1 或其他协议，使用简化的费率扣除
+			feeRatio := step.Fee / 100.0
+			amount = amount * (1 - feeRatio)
+		}
+
+		// 检查金额是否有效
+		if amount <= 0 {
+			return 0, false
+		}
 	}
+
+	// 计算利润
 	profit := amount - initial
 	return amount, profit >= minProfit
 }
@@ -316,68 +400,4 @@ func formatPath(path []graphEdge) string {
 		builder.WriteString(")")
 	}
 	return builder.String()
-}
-
-func stronglyConnectedComponents(n int, adjacency map[int][]graphEdge) [][]int {
-	index := 0
-	stack := make([]int, 0, n)
-	onStack := make([]bool, n)
-	indices := make([]int, n)
-	lowlink := make([]int, n)
-	for i := range indices {
-		indices[i] = -1
-		lowlink[i] = -1
-	}
-
-	var result [][]int
-	var strongConnect func(v int)
-
-	strongConnect = func(v int) {
-		indices[v] = index
-		lowlink[v] = index
-		index++
-		stack = append(stack, v)
-		onStack[v] = true
-
-		for _, edge := range adjacency[v] {
-			w := edge.ToIndex
-			if indices[w] == -1 {
-				strongConnect(w)
-				if lowlink[w] < lowlink[v] {
-					lowlink[v] = lowlink[w]
-				}
-			} else if onStack[w] {
-				if indices[w] < lowlink[v] {
-					lowlink[v] = indices[w]
-				}
-			}
-		}
-
-		if lowlink[v] == indices[v] {
-			var component []int
-			for {
-				if len(stack) == 0 {
-					break
-				}
-				w := stack[len(stack)-1]
-				stack = stack[:len(stack)-1]
-				onStack[w] = false
-				component = append(component, w)
-				if w == v {
-					break
-				}
-			}
-			if len(component) > 0 {
-				result = append(result, component)
-			}
-		}
-	}
-
-	for v := 0; v < n; v++ {
-		if indices[v] == -1 {
-			strongConnect(v)
-		}
-	}
-
-	return result
 }

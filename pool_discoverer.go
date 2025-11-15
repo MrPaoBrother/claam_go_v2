@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math/big"
 	"sync"
 	"time"
 
@@ -19,6 +20,8 @@ type poolDetail struct {
 	Token1   common.Address
 	Fee      float64
 	Protocol string
+	Reserve0 *big.Int // token0 储备量
+	Reserve1 *big.Int // token1 储备量
 }
 
 // PoolDiscoverer 从队列中消费区块，发现新的池子并写入存储
@@ -109,9 +112,29 @@ func (pd *PoolDiscoverer) discoverPoolsFromTransactions(ctx context.Context, txs
 					continue
 				}
 
+				topic0 := lg.Topics[0].Hex()
 				cfg, ok := pd.protocols[lg.Topics[0]]
 				if !ok {
-					continue
+					// V4 可能使用与 V3 相同的事件签名（因为池子结构类似）
+					// 尝试使用 V3 的配置来处理 V4 事件
+					v3TopicHash := common.HexToHash(UniswapV3SwapTopic)
+					if lg.Topics[0] == v3TopicHash {
+						// 检查是否是 V4 池子（可能需要通过地址或其他方式判断）
+						// 暂时也当作 V3 处理，后续可以根据实际需求区分
+						v3Cfg, v3Ok := pd.protocols[v3TopicHash]
+						if v3Ok {
+							cfg = v3Cfg
+							ok = true
+						}
+					}
+					if !ok {
+						// 调试：记录未匹配的事件 Topic（限制频率，避免日志过多）
+						// 只记录以 0x01 或 0x02 开头的，可能是 V4 相关
+						if len(topic0) >= 4 && (topic0[2:4] == "01" || topic0[2:4] == "02" || topic0[2:4] == "c4") {
+							log.Printf("未匹配的事件 Topic: %s, 地址: %s, 区块: %s", topic0, lg.Address.Hex(), receipt.BlockNumber.String())
+						}
+						continue
+					}
 				}
 
 				isNew, poolInfo, err := pd.inspectPool(ctx, lg, cfg)
@@ -193,6 +216,33 @@ func (pd *PoolDiscoverer) inspectPool(ctx context.Context, lg *types.Log, cfg pr
 		}
 	}
 
+	// 获取储备量
+	var reserve0, reserve1 *big.Int
+	if cfg.Name == ProtocolUniswapV2Like {
+		// V2 协议使用 getReserves 方法
+		reserve0, reserve1, err = CallGetReserves(ctx, contract)
+		if err != nil {
+			// 如果获取储备量失败，使用默认值 0
+			reserve0 = big.NewInt(0)
+			reserve1 = big.NewInt(0)
+		}
+	} else if cfg.Name == ProtocolUniswapV3 || cfg.Name == ProtocolUniswapV4 {
+		// V3/V4 协议通过 ERC20 balanceOf 获取池子合约的代币余额
+		poolAddr := lg.Address
+		reserve0, err = CallERC20BalanceOf(ctx, pd.client, token0, poolAddr)
+		if err != nil {
+			reserve0 = big.NewInt(0)
+		}
+		reserve1, err = CallERC20BalanceOf(ctx, pd.client, token1, poolAddr)
+		if err != nil {
+			reserve1 = big.NewInt(0)
+		}
+	} else {
+		// V1 暂时不支持储备量获取，设为 0
+		reserve0 = big.NewInt(0)
+		reserve1 = big.NewInt(0)
+	}
+
 	pd.knownPools.Store(poolAddr, true)
 
 	return true, poolDetail{
@@ -201,5 +251,7 @@ func (pd *PoolDiscoverer) inspectPool(ctx context.Context, lg *types.Log, cfg pr
 		Token1:   token1,
 		Fee:      poolFee,
 		Protocol: cfg.Name,
+		Reserve0: reserve0,
+		Reserve1: reserve1,
 	}, nil
 }

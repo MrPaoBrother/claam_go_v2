@@ -82,7 +82,7 @@ const (
 `
 
 	// PairABIJSON Uniswap V2 及类似协议的 Pair 合约 ABI
-	// 包含 token0 和 token1 方法
+	// 包含 token0、token1 和 getReserves 方法
 	PairABIJSON = `
 [
 	{
@@ -107,6 +107,28 @@ const (
 			{
 				"name": "",
 				"type": "address"
+			}
+		],
+		"payable": false,
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"constant": true,
+		"inputs": [],
+		"name": "getReserves",
+		"outputs": [
+			{
+				"name": "_reserve0",
+				"type": "uint112"
+			},
+			{
+				"name": "_reserve1",
+				"type": "uint112"
+			},
+			{
+				"name": "_blockTimestampLast",
+				"type": "uint32"
 			}
 		],
 		"payable": false,
@@ -161,12 +183,42 @@ const (
 	}
 ]
 `
+
+	// ERC20ABIJSON ERC20 标准代币合约 ABI
+	// 包含 balanceOf 方法，用于获取代币余额
+	ERC20ABIJSON = `
+[
+	{
+		"constant": true,
+		"inputs": [
+			{
+				"name": "_owner",
+				"type": "address"
+			}
+		],
+		"name": "balanceOf",
+		"outputs": [
+			{
+				"name": "balance",
+				"type": "uint256"
+			}
+		],
+		"payable": false,
+		"stateMutability": "view",
+		"type": "function"
+	}
+]
+`
 )
 
 // 常用地址
 const (
 	// WBNBAddressHex BSC 主网 WBNB 合约地址
 	WBNBAddressHex = "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"
+
+	// UniswapV4PoolManagerHex BSC 主网 Uniswap V4 PoolManager 合约地址（单例架构）
+	// 注意：需要根据实际部署地址更新
+	UniswapV4PoolManagerHex = ""
 )
 
 // GetProtocolsConfig 获取协议配置映射

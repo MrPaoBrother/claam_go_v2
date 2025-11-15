@@ -12,12 +12,9 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func main() {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	wsURL := DefaultBSCWssURL
-
+// initializeApp 初始化应用程序的基础组件
+// 返回配置、区块队列和解析后的 ABI
+func initializeApp() (*AppConfig, *BlockQueue, *abi.ABI, *abi.ABI, *abi.ABI) {
 	cfg, err := LoadConfig()
 	if err != nil {
 		log.Fatalf("加载配置失败: %v", err)
@@ -41,7 +38,45 @@ func main() {
 		log.Fatalf("解析 V3 ABI 失败: %v", err)
 	}
 
-	protocols := GetProtocolsConfig(&v1ABI, &v2ABI, &v3ABI)
+	return cfg, blockQueue, &v1ABI, &v2ABI, &v3ABI
+}
+
+// startBlockSubscriber 启动区块订阅器和队列监控
+// 注意：此函数会启动后台 goroutine，函数返回后 goroutine 会继续在后台运行
+// goroutine 的生命周期由 ctx 控制，当 ctx 被取消时会自动退出
+func startBlockSubscriber(ctx context.Context, wsURL string, conn *ethclient.Client, blockQueue *BlockQueue) {
+	// 启动区块订阅器（后台 goroutine）
+	subscriber := NewBlockSubscriber(wsURL, conn, blockQueue)
+	go func() {
+		if err := subscriber.Start(ctx); err != nil {
+			log.Printf("订阅器结束: %v", err)
+		}
+	}()
+
+	// 定时打印队列积压量（后台 goroutine）
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				log.Printf("当前区块队列积压: %d", blockQueue.Len())
+			}
+		}
+	}()
+}
+
+func main() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	wsURL := DefaultBSCWssURL
+
+	cfg, blockQueue, v1ABI, v2ABI, v3ABI := initializeApp()
+
+	log.Printf("连接 BSC 节点: %+v %+v %+v %+v %+v", cfg, blockQueue, v1ABI, v2ABI, v3ABI)
 
 	conn, err := ethclient.DialContext(ctx, wsURL)
 	if err != nil {
@@ -57,29 +92,11 @@ func main() {
 
 	arbQueue := NewArbitrageQueue(cfg.ArbQueueSize)
 
-	// 1. 订阅区块
-	subscriber := NewBlockSubscriber(wsURL, conn, blockQueue)
-	go func() {
-		if err := subscriber.Start(ctx); err != nil {
-			log.Printf("订阅器结束: %v", err)
-		}
-	}()
-
-	// // 定时打印队列积压量
-	go func() {
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				log.Printf("当前区块队列积压: %d", blockQueue.Len())
-			}
-		}
-	}()
+	// // 1. 订阅区块
+	startBlockSubscriber(ctx, wsURL, conn, blockQueue)
 
 	// // 2. 发现池子
+	protocols := GetProtocolsConfig(v1ABI, v2ABI, v3ABI)
 	discoverer := NewPoolDiscoverer(blockQueue, conn, store, protocols)
 	go discoverer.Start(ctx)
 

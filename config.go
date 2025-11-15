@@ -16,7 +16,7 @@ const (
 	// defaultArbReloadSeconds 套利发现者默认的刷新周期（秒）
 	defaultArbReloadSeconds = 60
 	// defaultArbMaxHops 默认的套利路径最大跳数
-	defaultArbMaxHops = 5
+	defaultArbMaxHops = 3
 	// defaultArbInitialCapital 默认的套利模拟起始资金（单位：USD）
 	defaultArbInitialCapital = 1.0
 	// defaultArbMinProfit 默认的套利最小收益门槛（单位：USD）
